@@ -9,8 +9,8 @@ import uvicorn
 
 API_KEY_SECRET = os.getenv("API_KEY_SECRET", "EnterpriseAutomationSecret2026")
 
-# FIXED FOR RAILWAY & CLOUD: Force database into /tmp directory to avoid read-only filesystem errors
-DB_PATH = os.path.join(tempfile.gettempdir(), "enterprise_crm.db")
+# FIXED FOR ALL CLOUD PROVIDERS: Use in-memory database configuration to avoid disk permission issues
+DB_PATH = ":memory:"
 
 app = FastAPI(
     title="Enterprise CRM Automation Sync Engine",
@@ -36,8 +36,11 @@ def verify_api_key(x_api_key: str = Header(..., description="Secure enterprise g
         raise HTTPException(status_code=401, detail="Security Violation: Invalid API credential header.")
     return x_api_key
 
+# Maintain a persistent connection for the in-memory database session lifetime
+_SHARED_CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
+
 def get_conn():
-    return sqlite3.connect(DB_PATH)
+    return _SHARED_CONN
 
 def init_db():
     conn = get_conn()
@@ -53,13 +56,12 @@ def init_db():
         )
     """)
     conn.commit()
-    conn.close()
 
 init_db()
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "service": "Enterprise CRM Automation Sync Engine", "db_path": DB_PATH}
+    return {"status": "online", "service": "Enterprise CRM Automation Sync Engine", "db_path": "RAM_MEMORY"}
 
 @app.post("/api/v1/sync-lead", status_code=201, dependencies=[Depends(verify_api_key)])
 def sync_lead_to_crm(lead: CustomerLead):
@@ -69,7 +71,6 @@ def sync_lead_to_crm(lead: CustomerLead):
         cursor.execute("INSERT INTO leads (name, email, phone, company) VALUES (?, ?, ?, ?)",
                         (lead.name, lead.email, lead.phone, lead.company))
         conn.commit()
-        conn.close()
         return {"status": "success", "message": f"🚀 Lead for '{lead.name}' successfully synced!"}
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Error: This email already exists.")
@@ -83,7 +84,6 @@ def get_all_leads():
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM leads ORDER BY sync_timestamp DESC")
     rows = cursor.fetchall()
-    conn.close()
     return [dict(row) for row in rows]
 
 @app.put("/api/v1/leads/{lead_id}", dependencies=[Depends(verify_api_key)])
@@ -92,12 +92,10 @@ def update_lead(lead_id: int, updated_fields: CustomerLead):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM leads WHERE id = ?", (lead_id,))
     if not cursor.fetchone():
-        conn.close()
         raise HTTPException(status_code=404, detail="Lead not found.")
     cursor.execute("UPDATE leads SET name=?, email=?, phone=?, company=? WHERE id=?",
                     (updated_fields.name, updated_fields.email, updated_fields.phone, updated_fields.company, lead_id))
     conn.commit()
-    conn.close()
     return {"status": "success", "message": f"🔄 Lead {lead_id} updated."}
 
 @app.delete("/api/v1/leads/{lead_id}", dependencies=[Depends(verify_api_key)])
@@ -106,11 +104,9 @@ def delete_lead(lead_id: int):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM leads WHERE id = ?", (lead_id,))
     if not cursor.fetchone():
-        conn.close()
         raise HTTPException(status_code=404, detail="Lead not found.")
     cursor.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
     conn.commit()
-    conn.close()
     return {"status": "success", "message": f"🗑️ Lead {lead_id} deleted."}
 
 if __name__ == "__main__":
