@@ -9,8 +9,8 @@ import uvicorn
 
 API_KEY_SECRET = os.getenv("API_KEY_SECRET", "EnterpriseAutomationSecret2026")
 
-# FIXED FOR ALL CLOUD PROVIDERS: Use in-memory database configuration to avoid disk permission issues
-DB_PATH = ":memory:"
+# Use /tmp (or an env-configured path) so writes never hit a read-only filesystem
+DB_PATH = os.getenv("DB_PATH", os.path.join(tempfile.gettempdir(), "enterprise_crm.db"))
 
 app = FastAPI(
     title="Enterprise CRM Automation Sync Engine",
@@ -33,14 +33,11 @@ class CustomerLead(BaseModel):
 
 def verify_api_key(x_api_key: str = Header(..., description="Secure enterprise gateway validation key")):
     if x_api_key != API_KEY_SECRET:
-        raise HTTPException(status_code=401, detail="Security Violation: Invalid API credential header.")
+        raise HTTPException(status_code=401, detail="Security Violation: Invalid or missing API credential header.")
     return x_api_key
 
-# Maintain a persistent connection for the in-memory database session lifetime
-_SHARED_CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
-
 def get_conn():
-    return _SHARED_CONN
+    return sqlite3.connect(DB_PATH)
 
 def init_db():
     conn = get_conn()
@@ -56,12 +53,13 @@ def init_db():
         )
     """)
     conn.commit()
+    conn.close()
 
 init_db()
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "service": "Enterprise CRM Automation Sync Engine", "db_path": "RAM_MEMORY"}
+    return {"status": "online", "service": "Enterprise CRM Automation Sync Engine"}
 
 @app.post("/api/v1/sync-lead", status_code=201, dependencies=[Depends(verify_api_key)])
 def sync_lead_to_crm(lead: CustomerLead):
@@ -71,11 +69,13 @@ def sync_lead_to_crm(lead: CustomerLead):
         cursor.execute("INSERT INTO leads (name, email, phone, company) VALUES (?, ?, ?, ?)",
                         (lead.name, lead.email, lead.phone, lead.company))
         conn.commit()
+        conn.close()
         return {"status": "success", "message": f"🚀 Lead for '{lead.name}' successfully synced!"}
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Error: This email already exists.")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 @app.get("/api/v1/leads", response_model=List[dict], dependencies=[Depends(verify_api_key)])
 def get_all_leads():
@@ -84,6 +84,7 @@ def get_all_leads():
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM leads ORDER BY sync_timestamp DESC")
     rows = cursor.fetchall()
+    conn.close()
     return [dict(row) for row in rows]
 
 @app.put("/api/v1/leads/{lead_id}", dependencies=[Depends(verify_api_key)])
@@ -92,11 +93,17 @@ def update_lead(lead_id: int, updated_fields: CustomerLead):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM leads WHERE id = ?", (lead_id,))
     if not cursor.fetchone():
+        conn.close()
         raise HTTPException(status_code=404, detail="Lead not found.")
-    cursor.execute("UPDATE leads SET name=?, email=?, phone=?, company=? WHERE id=?",
-                    (updated_fields.name, updated_fields.email, updated_fields.phone, updated_fields.company, lead_id))
-    conn.commit()
-    return {"status": "success", "message": f"🔄 Lead {lead_id} updated."}
+    try:
+        cursor.execute("UPDATE leads SET name=?, email=?, phone=?, company=? WHERE id=?",
+                        (updated_fields.name, updated_fields.email, updated_fields.phone, updated_fields.company, lead_id))
+        conn.commit()
+        return {"status": "success", "message": f"🔄 Lead {lead_id} updated."}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Error: This email already exists.")
+    finally:
+        conn.close()
 
 @app.delete("/api/v1/leads/{lead_id}", dependencies=[Depends(verify_api_key)])
 def delete_lead(lead_id: int):
@@ -104,9 +111,11 @@ def delete_lead(lead_id: int):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM leads WHERE id = ?", (lead_id,))
     if not cursor.fetchone():
+        conn.close()
         raise HTTPException(status_code=404, detail="Lead not found.")
     cursor.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
     conn.commit()
+    conn.close()
     return {"status": "success", "message": f"🗑️ Lead {lead_id} deleted."}
 
 if __name__ == "__main__":
