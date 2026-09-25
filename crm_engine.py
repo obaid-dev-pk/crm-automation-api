@@ -9,7 +9,7 @@ import uvicorn
 
 API_KEY_SECRET = os.getenv("API_KEY_SECRET", "EnterpriseAutomationSecret2026")
 
-# Cloud File Path Logic: Use a safe temp directory to bypass read-only cloud systems
+# CLOUD PATH UPGRADE: This writes to a totally open, writable path on live servers
 DB_PATH = os.getenv("DB_PATH", os.path.join(tempfile.gettempdir(), "enterprise_crm.db"))
 
 app = FastAPI(
@@ -57,12 +57,10 @@ def init_db():
 
 init_db()
 
-# 1. FIXED HEALTH CHECK: Securely hides internal system directory details
 @app.get("/")
 def health_check():
     return {"status": "online", "service": "Enterprise CRM Automation Sync Engine"}
 
-# 2. CREATE ENDPOINT (POST): Masked error exceptions to block data leaks
 @app.post("/api/v1/sync-lead", status_code=201, dependencies=[Depends(verify_api_key)])
 def sync_lead_to_crm(lead: CustomerLead):
     try:
@@ -76,10 +74,9 @@ def sync_lead_to_crm(lead: CustomerLead):
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Error: This email already exists.")
     except Exception as e:
-        print(f"Unexpected error: {e}")  # Logs error server-side safely
+        print(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error.")
 
-# 3. READ ENDPOINT (GET)
 @app.get("/api/v1/leads", response_model=List[dict], dependencies=[Depends(verify_api_key)])
 def get_all_leads():
     conn = get_conn()
@@ -90,7 +87,6 @@ def get_all_leads():
     conn.close()
     return [dict(row) for row in rows]
 
-# 4. FIXED UPDATE ENDPOINT (PUT): Tracks and isolates duplicate emails cleanly
 @app.put("/api/v1/leads/{lead_id}", dependencies=[Depends(verify_api_key)])
 def update_lead(lead_id: int, updated_fields: CustomerLead):
     conn = get_conn()
@@ -109,7 +105,6 @@ def update_lead(lead_id: int, updated_fields: CustomerLead):
     finally:
         conn.close()
 
-# 5. DELETE ENDPOINT (DELETE)
 @app.delete("/api/v1/leads/{lead_id}", dependencies=[Depends(verify_api_key)])
 def delete_lead(lead_id: int):
     conn = get_conn()
